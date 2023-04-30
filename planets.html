@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html style="padding:0;margin:0;background-color: black;">
+	<meta charset="utf-8">
+	<style>
+		canvas{
+			position:fixed;
+			left:0;
+			top:0;
+		}
+	</style>
+	<body id = "bodbod" style="padding:0;margin:0;overflow: hidden;">
+		<canvas id="screen" style="z-index: 9;"></canvas>
+		<script src="gpu-browser.min.js"></script>
+		<script type="text/javascript" src="campoint3d.js"></script>
+		<script>
+			var canvas = document.getElementById('screen');
+			var numCircles = Math.round(Math.min(window.innerHeight,window.innerWidth)/100);
+			var planeSize = 100;
+			var dotsparsity = 2; //gaps between
+
+			var pointfield = [];
+			for(let i = 0; i<planeSize; i+=dotsparsity){
+				let pointrow = [];
+				for(let j = 0; j<planeSize; j+=dotsparsity){
+					pointrow.push(new Point(i-planeSize/2,j-planeSize/2,0));
+				}
+				pointfield.push(pointrow);
+			}
+
+			function drawPointField(zvals){
+				for(let i = 0; i<planeSize/dotsparsity; i++){
+					for(let j = 0; j<planeSize/dotsparsity; j++){
+						pointfield[i][j].pos[2] = zvals[i][j];
+						draw3dsphere(pointfield[i][j]);
+					}
+				}			
+			}
+
+			const gpu = new GPU();
+			// let testdata = [];
+			// for(each of items){
+			// 	testdata.push([each.x,kernelCanvas.height-each.y,each.m]);
+			// }
+			// testkernel(testdata, canvas.width, items.length);
+
+			const testkernel = gpu.createKernel(function(maspos, numPlanets, halfPlaneSize, dotsparsity) {
+				// const lines = [1024,512,256,128,64,32,16,8,4,2,1];
+
+				let gxhere = 0;
+				let gyhere = 0;
+				for(let j = 0; j<numPlanets; j++){ // 12 is number of planets
+					// ghere += maspos[j][2]/((this.thread.x-maspos[j][0])*(this.thread.x-maspos[j][0]) + (this.thread.y-maspos[j][1])*(this.thread.y-maspos[j][1]));
+					let tempx = this.thread.y + 0.0001; // Prepare for trouble...
+					let tempy = this.thread.x + 0.0001; // and make it double!
+					let myX = tempx*dotsparsity-halfPlaneSize-maspos[j][0];
+					let myY = tempy*dotsparsity-halfPlaneSize-maspos[j][1]
+					let dx = myX*myX;
+					let dy = myY*myY;
+					// let denom = (dx + dy)*(dx + dy);
+					// gxhere += maspos[j][2]*2*(this.thread.x-maspos[j][0])/denom;
+					// gyhere += maspos[j][2]*2*(this.thread.y-maspos[j][1])/denom;
+					let denom = 0.02*maspos[j][2]/((dx+dy)**1.5); // SO slow
+					gxhere += denom*myX;
+					gyhere += denom*myY;
+				}
+				//ghere = ghere*100000
+				let ghere = 200000*(Math.sqrt(gxhere*gxhere + gyhere*gyhere));
+				return -ghere//Math.min(Math.max(ghere, -20), 20);
+				
+			}).setOutput([500,500]);
+			var ctx = canvas.getContext('2d');
+
+			items = []
+
+			var click = false
+			var selected;
+			var mouseX = 0;
+			var mouseY = 0;
+			var pause = false;
+			var timeSwitch;
+			var keybindsTargetX = canvas.width/50;
+
+			var drawcircles = true;
+			var topology = true;
+			var trails = false;
+			var slopeField = true;
+			let fieldPix = 35;
+			let slopeMax = 20;
+			let fieldLines = false;
+
+			var collision = true;
+			var gravity = true;
+			var negativeG = false;
+			
+
+			canvasResize();
+
+			canvas.addEventListener('mousedown', onClick);
+			canvas.addEventListener("mouseup", onRelease);
+			// canvas.addEventListener("wheel", scroll)
+			canvas.addEventListener('mouseleave', onMouseLeave);
+			canvas.addEventListener('mousemove', onMouseMove);
+
+			document.oncontextmenu = function(e) { e.preventDefault(); e.stopPropagation(); }
+
+			document.addEventListener('keydown', (event) => {
+			  const keyName = event.key;
+				switch(keyName){
+					case 'm':
+						masses = [];
+						for(let each of items){
+							masses.push(Math.round(100*each.m)/100);
+						}
+						masses.sort();
+						console.log(masses);
+						return;
+					case 'Shift':
+						if(timeSwitch){
+							timeFac *= 10;
+						} else{
+							timeFac /= 10;
+						}
+						timeSwitch = !timeSwitch;
+						return;
+					case ' ':
+						pause = !pause;
+						ctx.font = canvas.width / 40 + "px Arial";
+						ctx.fillText("paused", 35*canvas.width/40, 19*canvas.height/20);
+						return;
+					case "1":
+						topology = !topology;
+						return;
+					case "2":
+						slopeField = !slopeField;
+						return;
+					case "3":
+						fieldLines = !fieldLines;
+						return;
+					case "q":
+						drawcircles = !drawcircles;
+						return;
+					case "w":
+						trails = !trails;
+						return;
+					case "a":
+						collision = !collision;
+						return;	
+					case "s":
+						gravity = !gravity;
+						return;	
+					case "d":
+						negativeG = !negativeG;
+						return;	
+					case "Enter":
+						topology = (Math.random()<0.4)?true:false;
+						slopeField = (Math.random()<0.5)?true:false;
+						fieldLines = (Math.random()<0.40)?true:false;
+						drawcircles = (Math.random()<0.6)?true:false;
+						trails = (Math.random()<0.3)?true:false;
+						return;	
+					// default:
+						// console.log(keyName)
+				}
+			}, false);
+
+			function onClick(event){
+				let inRange = [];
+				for(let i = 0; i < items.length; i++){
+					dx = event.pageX - items[i].x;
+					dy = event.pageY - items[i].y;
+					bigr = items[i].r+10;
+					if(Math.abs(dx) > bigr || Math.abs(dy) > bigr){ // square check
+						continue;
+					}
+					let dist = Math.sqrt(dx*dx + dy*dy);
+					if(dist > bigr){ 
+						continue;
+					}
+					inRange.push([i,dist]);
+				}
+				if(inRange.length == 0){
+					return;
+				}
+				inRange.sort((a, b) => a[1]-b[1]); //lowest to highest based on the dist
+				selected = items[inRange[0][0]];
+				click = true;
+			}
+
+			function onRelease(event){
+				if(click){
+					selected.mouseGx = 0;
+					selected.mouseGy = 0;
+				}
+				click = false;
+			}
+
+			function onMouseMove(event){
+				mouseX = event.pageX;
+				mouseY = event.pageY;
+				keybindsTargetX = canvas.width/50;
+			}
+
+			function onMouseLeave(event){
+				if(click){
+					selected.mouseGx = 0;
+					selected.mouseGy = 0;
+				}
+				click = false;
+				keybindsTargetX = -canvas.width/6;
+			}
+			const frameTicks = 4;
+			const scale = 10000000;  //more equals more distance
+			var timeFac = (0.00001/Math.log(scale))/frameTicks;
+			const threshold = 1;
+			const veloFac = 1;
+			const gConst = scale;
+			// const maxG = 100000*gConst*0.5/scale;
+			// const maxGsquare = maxG/Math.sqrt(2);
+			const sizeFac = 1;
+			const lineW = 1.5;
+			const maxVo = 1/timeFac;
+
+			class Item{
+				constructor(x, y, m = 0){
+					this.m = m;
+					if(this.m == 0){
+						this.m = 0.8*Math.random()+0.2;
+						this.m = 8*this.m*this.m*this.m*this.m*this.m*this.m;
+					}
+					this.sign = Math.sign(Math.random()-1/2) // 1/3 chance to be negative
+					this.r = 2*Math.cbrt(this.m);
+					this.x = x;
+					this.y = y;
+					this.vx = maxVo*(Math.random()-1/2);
+					this.vy = maxVo*(Math.random()-1/2);
+					this.gx = 0;
+					this.gy = 0;
+					let seed = 2*Math.PI*Math.random();
+					this.color = "rgba("+(75*Math.sin(seed)+180)+","+(75*Math.sin(seed + 2*Math.PI/3)+180)+","+(75*Math.sin(seed + 4*Math.PI/3)+180)+",1)";
+					this.tooMuch = false;
+					this.shiftx = 0;
+					this.shifty = 0;
+					this.colliding = false;
+					this.newvx = 0;
+					this.newvy = 0;
+					this.pastPos = [];
+					this.mouseGx = 0;
+					this.mouseGy = 0;
+					this.point = new Point(this.x, this.y, 0, this.color);
+				}
+				gravitate(){
+					// for(let i = 0; i < items.length; i++){
+					for(let that of items){
+						if(this == that){
+							continue;
+						}
+						let gxgy;
+						if(negativeG){
+							gxgy = field(this.x,this.y,this.sign*this.m, that.x,that.y,(that.sign*this.sign)*that.m);
+						}else{
+							gxgy = field(this.x,this.y,this.m, that.x,that.y,that.m);
+						}
+						this.gx+=gxgy[0]; // gx gets reset to 0 every update
+						this.gy+=gxgy[1];
+					}
+					this.gx*=gConst;
+					this.gy*=gConst;
+					// if(Math.abs(this.gx) >= maxGsquare || Math.abs(this.gy) >= maxGsquare){ //check inscribed square first
+					// 	let gxy = Math.sqrt(this.gx*this.gx+this.gy*this.gy);
+					// 	if(gxy > maxG){ //check speed
+					// 		// this.gx*=maxG/gxy;
+					// 		// this.gy*=maxG/gxy;
+					// 		// this.tooMuch = true;
+					// 	}
+					// }
+				}
+				collide(){
+					for(let that of items){
+						if(this == that){
+							continue;
+						}
+						let dx = this.x-that.x;
+						let dy = this.y-that.y;
+						let rsum = this.r+that.r;
+						if(Math.abs(dx) > rsum || Math.abs(dy) > rsum){ // square check
+							continue;
+						}
+						let dist = Math.sqrt(dx*dx + dy*dy);
+						if(dist > rsum){ 
+							continue;
+						}
+						this.colliding = true;
+						//collision !!
+						let overlap = rsum - dist;
+						// console.log(rsum, dist, overlap);
+						this.shiftx=(that.m/(this.m+that.m))*dx*overlap/dist;
+						this.shifty=(that.m/(this.m+that.m))*dy*overlap/dist;
+
+						// this.newvx=(this.m*this.vx + that.m*(that.vx + that.vx - this.vx))/(this.m+that.m);
+						// this.newvy=(this.m*this.vy + that.m*(that.vy + that.vy - this.vy))/(this.m+that.m);
+
+						// find unit vector of collision
+						let ux = that.x - this.x;
+						let uy = that.y - this.y;
+						let ul = Math.sqrt(ux*ux + uy*uy)
+						ux /= ul;
+						uy /= ul;
+						// project velocities on the collision vector 
+						let comp1 = ux*this.vx + uy*this.vy;
+						let comp2 = ux*that.vx + uy*that.vy;
+						// perform a 1-d collision to find exit velocities parallel to collision vector
+						let exit1 = (this.m*comp1 + that.m*(comp2 + comp2 - comp1))/(this.m+that.m);
+						// scale collision unit vector by the above calculation
+						let scalex = exit1 * ux;
+						let scaley = exit1 * uy;
+						// combine components: exit parallel to collision & original velo ortho to collision
+						this.newvx = 1*(this.vx - ux*comp1) + 1.00*scalex;
+						this.newvy = 1*(this.vy - uy*comp1) + 1.00*scaley;
+					}
+				}
+				update(){
+					if(this.colliding){
+						this.vx = this.newvx;
+						this.vy = this.newvy;
+					}
+
+					let thisthresh = threshold+this.r;
+					let overx = Math.abs(this.x) - (planeSize/2-thisthresh);
+					let overy = Math.abs(this.y) - (planeSize/2-thisthresh);
+					if(overx > 0){
+						// this.gx += Math.sign(this.x-canvas.width/2)/500000;
+						this.vx*=-0.8;
+						this.vy*=0.8;
+						if(this.x > 0){
+							this.x = planeSize/2-thisthresh;
+						} else{
+							this.x = -planeSize/2+thisthresh;
+						}
+					}
+					if(overy > 0){
+						// this.gy += Math.sign(this.y-canvas.height/2)/500000;
+						this.vy*=-0.8;
+						this.vx*=0.8;
+						if(this.y > 0){
+							this.y = planeSize/2-thisthresh;
+						} else{
+							this.y = -planeSize/2+thisthresh;
+						}
+					}
+					this.gx += this.mouseGx;
+					this.gy += this.mouseGy;
+					if(this.colliding){
+						this.vx-=0.2*this.gx*timeFac*200000;
+						this.vy-=0.2*this.gy*timeFac*200000;
+					} else{
+						this.vx-=this.gx*timeFac*200000;
+						this.vy-=this.gy*timeFac*200000;
+					}
+					this.x+=this.shiftx;
+					this.y+=this.shifty;
+					
+					// arbitrary friction/air resist, sort of.
+					// this.vx*=1-Math.abs(this.vx)/(400000000*this.r*(this.gx+1));
+					// this.vy*=1-Math.abs(this.vy)/(400000000*this.r*(this.gy+1));
+
+					this.x+=veloFac*this.vx*timeFac;
+					this.y+=veloFac*this.vy*timeFac;
+
+					this.colliding = false;
+					this.tooMuch = false;
+					this.gx = 0;
+					this.gy = 0;
+					this.shiftx = 0;
+					this.shifty = 0;
+				}
+				draw(){
+					this.point.pos[0] = this.x;
+					this.point.pos[1] = this.y;
+					this.point.project(camera);
+
+					ctx.fillStyle = this.color;
+					ctx.beginPath();
+					ctx.arc(this.point.x, this.point.y, 0.1*2*camera.pdist*this.r/(Math.sqrt(dotdiff3d(...this.point.pos, ...camera.pos))-this.r), 0, 2 * Math.PI);
+					ctx.fill();
+				}
+			}
+
+			function dotdiff3d(x1,y1,z1,x2,y2,z2){ // (v1-v2)*(v1-v2)
+				return ((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2) + (z1-z2)*(z1-z2));
+			}
+
+			function draw3dsphere(thePoint){ //approximation
+				thePoint.project(camera);
+
+				ctx.fillStyle = "white";
+				// let sizeApprox = 0.05*camera.pdist/(Math.sqrt(dotdiff3d(...thePoint.pos, ...camera.pos))-dotradius);
+				let sizeApprox = 1;
+				// ctx.beginPath();
+				// ctx.arc(thePoint.x, thePoint.y, 0.02*camera.pdist/(Math.sqrt(dotdiff3d(...thePoint.pos, ...camera.pos))-dotradius), 0, 2 * Math.PI);
+				// ctx.fill();
+				ctx.fillRect(thePoint.x-sizeApprox, thePoint.y-sizeApprox, 2*sizeApprox, 2*sizeApprox);
+			}
+
+			function randobject(num=1){
+				for(i = num; num > 0; num -=1){
+					let tooClose = true;
+					let newx;
+					let newy;
+					do{
+						newx = Math.random()*(planeSize-threshold*2) - planeSize/2-threshold;
+						newy = Math.random()*(planeSize-threshold*2) - planeSize/2-threshold;
+						for(that of items){
+							let dx = newx-that.x;
+							let dy = newy-that.y;
+							let radius = 100;
+							if(Math.abs(dx) > radius || Math.abs(dy) > radius){ // square check
+								continue;
+							}
+							let dist = Math.sqrt(dx*dx + dy*dy);
+							if(dist > radius){ 
+								continue;
+							}
+							tooClose = true;
+						}
+					}while(false);
+					items.push(new Item(newx, newy))
+				}
+			}
+
+			function field(x1,y1,m1, x2,y2,m2){
+				let dx = (x1-x2)*(x1-x2);
+				let dy = (y1-y2)*(y1-y2);
+				let denom = (dx + dy)*(dx + dy)
+				// return [m2*2*(x1-x2)/denom, m2*2*(y1-y2)/denom]; //must be multiplied by gconst afterwards
+				return [m2*(x1-x2)/((dx+dy)**1.5), m2*(y1-y2)/((dx+dy)**1.5)];
+			}
+			
+			let keybindsEaseX = keybindsTargetX;
+			function fillscreen(timestamp){
+				ctx.font = canvas.height / 40 + "px Arial";
+				ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+				stritems = items.length.toString();
+				ctx.fillText(items.length, canvas.width - canvas.width*stritems.length/54 - canvas.width/40, canvas.height / 20);
+			}
+			
+
+			//3D STARTS HERE!!!!!!!
+			let dotradius = 5;
+
+			canvas.width = canvas.offsetWidth;
+			canvas.height = canvas.offsetHeight;
+
+			var butt = -1; // 0 left, 1 middle, 2 right
+			var mouseX = 0;
+			var mouseY = 0;
+			var clickstart = [0,0];
+			var xcenter = canvas.width/2;
+  			var ycenter = canvas.height/2;
+			
+			const planetosize = 20; //increases distance of plane away from camera AND scales everything down
+			var bigness = 15/planetosize; // overall scale factor
+
+			var initcamdist = 50; // fov effects (becomes orthographic as approaches infinity)
+			var zoomfac = 1/Math.sqrt(initcamdist);
+			var camdistort = 50; // fov effects (becomes orthographic as approaches infinity)
+
+			camera = new Cam(39.33347860859019, 24.170967999528635, 19.20004600289643);
+
+			var originsize = canvas.width/70;
+			var originpoints = [];
+
+			originpoints = [];
+			originpoints.push(new Point(originsize,0,0,"rgba(255,120,120,0.5)"));
+			originpoints.push(new Point(0,originsize,0,"rgba(120,255,120,0.5)"));
+			originpoints.push(new Point(0,0,originsize,"rgba(120,120,255,0.5)"));
+			originpoints.push(new Point(-originsize,0,0,"rgba(255,120,120,0.5)"));
+			originpoints.push(new Point(0,-originsize,0,"rgba(120,255,120,0.5)"));
+			originpoints.push(new Point(0,0,-originsize,"rgba(120,120,255,0.5)"));
+
+			function draworigin(){
+				let names = ["+","+","+","-","-","-"];
+				i = 0;
+				for(let dot of originpoints){
+					dot.project(camera);
+					dot.draw(50*zoomfac);
+					ctx.lineWidth = 2;
+					ctx.strokeStyle = dot.color;
+					ctx.fillStyle = "white";
+					ctx.beginPath();
+					ctx.moveTo(xcenter,ycenter);
+					ctx.lineTo(dot.x, dot.y);
+					ctx.stroke();
+					ctx.font = "bold " + 100*zoomfac + "px Clear Sans";
+					ctx.textAlign = "center";
+					ctx.textBaseline = "middle";
+					ctx.shadowColor = "black";
+					ctx.shadowBlur = 4;
+					ctx.fillText(names[i], dot.x, dot.y);
+					ctx.shadowBlur = 0;
+					i++; //lazy to change the for loop
+				}
+			}
+			function refresh(){
+				//fillscreen();
+				// ctx.clearRect(0,0,canvas.width, canvas.height)
+				// ctx.fillStyle="black";
+				// ctx.fillRect(0,0,canvas.width,canvas.height);
+				camera.update();
+				// outline.draw();
+				draworigin();
+				// grid.draw();
+			}
+
+			canvas.oncontextmenu = function(e) { e.preventDefault(); e.stopPropagation(); }
+
+			canvas.addEventListener('mousedown', onClick);
+			canvas.addEventListener("mouseup", onRelease);
+			canvas.addEventListener('mouseleave', onMouseLeave);
+			canvas.addEventListener('mousemove', onMouseMove);
+			canvas.addEventListener("wheel", scroll)
+
+			function scroll(event){
+				// console.log(event.deltaY)
+				// camera.zoom(Math.sign(event.deltaY));
+				camera.zoom(Math.sign(event.deltaY),Math.sqrt(Math.abs(event.deltaY))/4);
+			}
+
+			function preventDefaults (e) {
+			  e.preventDefault()
+			  e.stopPropagation()
+			}
+
+			function onClick(event){
+				//click = true;
+				butt = event.button;
+			}
+
+			function onRelease(event){
+				butt = -1;
+			}
+
+			function onMouseMove(event){
+        		//mousemoved = true;
+			  	mouseX = event.offsetX;
+			  	mouseY = event.offsetY;
+				if(butt == 2){
+					let diffx = clickstart[0] - (xcenter-mouseX);
+					let diffy = clickstart[1] - (ycenter-mouseY);
+					camera.orbit(-20*diffx/(1000), 20*diffy/(1000));
+				}
+				clickstart = [xcenter-mouseX,ycenter-mouseY]; //must use center because cavnas corners move when resizing
+			}
+
+			function onMouseLeave(event){
+				butt = -1;
+			}
+
+			function transform(vect, useA){ //uses the testmatrix
+				let outMatrix = [0,0,0];
+				if(useA){
+					outMatrix.push(0);
+				}
+				for(let i=0; i<outMatrix.length; i++){ 
+					outMatrix[i] = (vect[0]*testMatrix[0][i]+vect[1]*testMatrix[1][i]+vect[2]*testMatrix[2][i]+((useA)?(vect[3]*testMatrix[3][i]):0));
+				}
+				return outMatrix;
+			}
+
+			/// 3D STUFF ENDS HERE !!!!
+
+			oldTime = 0;
+			function loop(timestamp){
+				// if(pause){
+				// 	requestAnimationFrame(loop);
+				// 	return;
+				// }
+				// console.log(Math.round(timestamp-oldTime));
+				oldTime = timestamp;
+				if(!pause){
+					for(let iter = 0; iter < 4; iter++){
+						// if(click){
+						// 	let dx = selected.x - mouseX;
+						// 	let dy = selected.y - mouseY;
+						// 	let dist = Math.sqrt(dx*dx + dy*dy);
+						// 	let specialdist = dist + 300;
+						// 	selected.mouseGx = 2*specialdist*dx/(selected.m+0.5);
+						// 	selected.mouseGy = 2*specialdist*dy/(selected.m+0.5);
+						// 	selected.vx*=1-1/(dist/5+20*selected.m+30);
+						// 	selected.vy*=1-1/(dist/5+20*selected.m+30);
+						// }
+						if(gravity){
+							for(var i = 0; i < items.length; i++){
+								items[i].gravitate(i);
+							}
+						}
+						if(collision){
+							for(var i = 0; i < items.length; i++){
+								items[i].collide(i);
+							}
+						}
+						for(var i = 0; i < items.length; i++){
+							items[i].update(i);
+						}
+						// ctx.fillStyle="black";
+						// ctx.fillRect(0,0,canvas.width,canvas.height);
+
+						items = items.sort((a, b) => 0.5 - Math.random());
+					}
+				}
+				// ctx.fillStyle = "black";
+				// ctx.fillRect(0, 0, canvas.width, canvas.height);
+				ctx.clearRect(0, 0, canvas.width, canvas.height);
+				fillscreen(timestamp);
+				camera.update();
+				draworigin();
+				for(var i = 0; i < items.length; i++){
+					items[i].draw();
+				}
+				let testdata = [];
+				for(each of items){
+					testdata.push([each.x,each.y,each.m]);
+				}	
+				let zvals = testkernel(testdata, items.length, planeSize/2, dotsparsity);
+				drawPointField(zvals);
+				if(click){
+					ctx.strokeStyle = "white"
+					ctx.beginPath();
+					ctx.moveTo(mouseX, mouseY);
+					ctx.lineTo(selected.x, selected.y);
+					ctx.stroke();
+				}
+				requestAnimationFrame(loop);
+			}
+			
+			// setInterval(function(){
+			// 	loop();
+			// }, 1000/(4*60));
+			
+
+			randobject(numCircles);
+			// items[0].m = 500;
+			// items[0].r = 1;
+			requestAnimationFrame(loop)
+
+			window.onresize = canvasResize;
+			function canvasResize() {
+				canvas.width  = window.innerWidth;
+				canvas.height = window.innerHeight;
+				keybindsTargetX = canvas.width/50;
+			}
+
+		</script>
+	</body>
+</html>
