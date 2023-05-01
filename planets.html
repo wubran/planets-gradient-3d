@@ -16,7 +16,7 @@
 			var canvas = document.getElementById('screen');
 			var numCircles = Math.round(Math.min(window.innerHeight,window.innerWidth)/100);
 			var planeSize = 100;
-			var dotsparsity = 2; //gaps between
+			var dotsparsity = 3; //gaps between
 
 			var pointfield = [];
 			for(let i = 0; i<planeSize; i+=dotsparsity){
@@ -27,14 +27,92 @@
 				pointfield.push(pointrow);
 			}
 
-			function drawPointField(zvals){
+			function projectPointField(zvals){
 				for(let i = 0; i<planeSize/dotsparsity; i++){
 					for(let j = 0; j<planeSize/dotsparsity; j++){
 						pointfield[i][j].pos[2] = zvals[i][j];
+						pointfield[i][j].project(camera);
+					}
+				}
+			}
+			function drawPointField(){
+				for(let i = 0; i<planeSize/dotsparsity; i++){
+					for(let j = 0; j<planeSize/dotsparsity; j++){
 						draw3dsphere(pointfield[i][j]);
 					}
-				}			
+				}	
 			}
+
+			function drawFilledField(){
+				// loop through the quads
+				// turn the warped quadrilaterals into 4 triangles each using a midpoint (center of mass)
+				// loop through the triangles
+				// calculate the normal of each triangle (important: z always facing up)
+				// calculate color based on normal
+				// render triangle if facing camera
+				for(let i = 0; i<planeSize/dotsparsity-1; i++){
+					for(let j = 0; j<planeSize/dotsparsity-1; j++){
+						if(pointfield[i][j].pos[2] == -70 && pointfield[i+1][j].pos[2] == -70 && pointfield[i][j+1].pos[2] == -70 && pointfield[i+1][j+1].pos[2] == -70){
+							continue;
+						}
+						let vertices = [pointfield[i][j], pointfield[i+1][j],
+										pointfield[i+1][j+1], pointfield[i][j+1],
+										pointfield[i][j]]; // for looping purposes (silly solution)
+						// console.log(vertices)
+						let midpoint = new Point((i+0.5)*dotsparsity-planeSize/2,(j+0.5)*dotsparsity-planeSize/2,0);
+
+						for(let k = 0; k<4; k++){
+							midpoint.pos[2]+=vertices[k].pos[2];
+						}
+						midpoint.pos[2]/=4;
+
+						for(let k = 0; k<4; k++){ //loop through the triangles
+							// let triangle = [vertices[k], vertices[k+1], midpoint]
+							// assume all vertices have been projected already
+							midpoint.project(camera)
+
+							let normal = triNorm(midpoint.pos, vertices[k].pos, vertices[k+1].pos)
+							var red = 60 * 1.3 * normal[0] + 200;
+							var green = 60 * 1.3 * normal[1] + 200;
+							var blue = 60 * 1.3 * normal[2]  + 200;		
+							ctx.fillStyle = "rgba("+red+","+green+","+blue+",0.6)";
+
+							ctx.strokeStyle = "white";
+							ctx.lineWidth = 0.5;
+							ctx.beginPath();
+							ctx.moveTo(midpoint.x, midpoint.y);
+							ctx.lineTo(vertices[k].x, vertices[k].y);
+							ctx.lineTo(vertices[k+1].x, vertices[k+1].y);
+							ctx.lineTo(midpoint.x, midpoint.y);
+							ctx.fill();
+							// ctx.stroke();
+						}
+					}
+				}
+			}
+
+			function triNorm(vertex1, vertex2, vertex3) {
+				// Calculate two vectors within the triangle
+				const vector1 = [vertex2[0] - vertex1[0], vertex2[1] - vertex1[1], vertex2[2] - vertex1[2]];
+				const vector2 = [vertex3[0] - vertex1[0], vertex3[1] - vertex1[1], vertex3[2] - vertex1[2]];
+
+				// Calculate the cross product of the two vectors
+				const normalVector = [
+					vector1[1] * vector2[2] - vector1[2] * vector2[1],
+					vector1[2] * vector2[0] - vector1[0] * vector2[2],
+					vector1[0] * vector2[1] - vector1[1] * vector2[0]
+				];
+
+				// Return the normalized normal vector
+				const magnitude = Math.sqrt(normalVector[0] ** 2 + normalVector[1] ** 2 + normalVector[2] ** 2);
+				// return [normalVector[0] / magnitude, normalVector[1] / magnitude, normalVector[2] / magnitude];
+				if(normalVector[2] > 0){
+					return [normalVector[0] / magnitude, normalVector[1] / magnitude, normalVector[2] / magnitude];
+				} else{
+					return [-normalVector[0] / magnitude, -normalVector[1] / magnitude, -normalVector[2] / magnitude];
+				}
+			}
+
 
 			const gpu = new GPU();
 			// let testdata = [];
@@ -64,8 +142,9 @@
 					gyhere += denom*myY;
 				}
 				//ghere = ghere*100000
-				let ghere = 200000*(Math.sqrt(gxhere*gxhere + gyhere*gyhere));
-				return -ghere//Math.min(Math.max(ghere, -20), 20);
+				let ghere = 50000*(Math.sqrt(gxhere*gxhere + gyhere*gyhere));
+				// return -ghere//Math.min(Math.max(ghere, -20), 20);
+				return Math.max(-ghere, -70);
 				
 			}).setOutput([500,500]);
 			var ctx = canvas.getContext('2d');
@@ -390,7 +469,7 @@
 			}
 
 			function draw3dsphere(thePoint){ //approximation
-				thePoint.project(camera);
+				// thePoint.project(camera);
 
 				ctx.fillStyle = "white";
 				// let sizeApprox = 0.05*camera.pdist/(Math.sqrt(dotdiff3d(...thePoint.pos, ...camera.pos))-dotradius);
@@ -621,7 +700,9 @@
 					testdata.push([each.x,each.y,each.m]);
 				}	
 				let zvals = testkernel(testdata, items.length, planeSize/2, dotsparsity);
-				drawPointField(zvals);
+				projectPointField(zvals)
+				// drawPointField();
+				drawFilledField();
 				if(click){
 					ctx.strokeStyle = "white"
 					ctx.beginPath();
