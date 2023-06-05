@@ -10,13 +10,16 @@
 	</style>
 	<body id = "bodbod" style="padding:0;margin:0;overflow: hidden;">
 		<canvas id="screen" style="z-index: 9;"></canvas>
-		<script src="gpu-browser.min.js"></script>
+		<!-- <script src="gpu-browser.min.js"></script> -->
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/gpu.js/1.0.2/gpu.min.js"></script>
 		<script type="text/javascript" src="campoint3d.js"></script>
 		<script>
 			var canvas = document.getElementById('screen');
 			var numCircles = Math.round(Math.min(window.innerHeight,window.innerWidth)/100);
 			var planeSize = 100;
-			var dotsparsity = 3; //gaps between
+			var phalf = planeSize/2;
+			var dotsparsity = 2; //gaps between
+			var dotCount = planeSize/dotsparsity;
 
 			var pointfield = [];
 			for(let i = 0; i<planeSize; i+=dotsparsity){
@@ -30,7 +33,7 @@
 			function projectPointField(zvals){
 				for(let i = 0; i<planeSize/dotsparsity; i++){
 					for(let j = 0; j<planeSize/dotsparsity; j++){
-						pointfield[i][j].pos[2] = zvals[i][j];
+						pointfield[i][j].pos[2] = zvals[i][j]//*globalZoffset;
 						pointfield[i][j].project(camera);
 					}
 				}
@@ -72,6 +75,7 @@
 							midpoint.project(camera)
 
 							let normal = triNorm(midpoint.pos, vertices[k].pos, vertices[k+1].pos)
+							// let normal = [0,0,1];
 							var red = 60 * 1.3 * normal[0] + 200;
 							var green = 60 * 1.3 * normal[1] + 200;
 							var blue = 60 * 1.3 * normal[2]  + 200;		
@@ -91,6 +95,38 @@
 				}
 			}
 
+			function fastFilledField(){
+				// loop through the quads
+				// turn the warped quadrilaterals into 4 triangles each using a midpoint (center of mass)
+				// loop through the triangles
+				// calculate the normal of each triangle (important: z always facing up)
+				// calculate color based on normal
+				// render triangle if facing camera
+				for(let i = 0; i<planeSize/dotsparsity-1; i++){
+					for(let j = 0; j<planeSize/dotsparsity-1; j++){
+						if(pointfield[i][j].pos[2] == -70 && pointfield[i+1][j].pos[2] == -70 && pointfield[i][j+1].pos[2] == -70 && pointfield[i+1][j+1].pos[2] == -70){
+							continue;
+						}
+						let vertices = [pointfield[i][j], pointfield[i+1][j],
+										pointfield[i+1][j+1], pointfield[i][j+1],
+										pointfield[i][j]]; // for looping purposes (silly solution)
+
+						// ctx.fillStyle = "rgba(255,127,255,0.4)";
+						ctx.fillStyle = "hsla("+1.5*(pointfield[i][j].pos[2] + pointfield[i+1][j].pos[2] + pointfield[i+1][j+1].pos[2] + pointfield[i][j+1].pos[2])+",100%,70%,0.6)"
+						// ctx.strokeStyle = "white";
+						// ctx.lineWidth = 0.5;
+						ctx.beginPath();
+						ctx.moveTo(pointfield[i][j].x, pointfield[i][j].y);
+						ctx.lineTo(pointfield[i+1][j].x, pointfield[i+1][j].y);
+						ctx.lineTo(pointfield[i+1][j+1].x, pointfield[i+1][j+1].y);
+						ctx.lineTo(pointfield[i][j+1].x, pointfield[i][j+1].y);
+						ctx.lineTo(pointfield[i][j].x, pointfield[i][j].y);
+						ctx.fill();
+						// ctx.stroke();
+					}
+				}
+			}
+
 			function triNorm(vertex1, vertex2, vertex3) {
 				// Calculate two vectors within the triangle
 				const vector1 = [vertex2[0] - vertex1[0], vertex2[1] - vertex1[1], vertex2[2] - vertex1[2]];
@@ -104,7 +140,7 @@
 				];
 
 				// Return the normalized normal vector
-				const magnitude = Math.sqrt(normalVector[0] ** 2 + normalVector[1] ** 2 + normalVector[2] ** 2);
+				const magnitude = Math.sqrt(normalVector[0]*normalVector[0] + normalVector[1]*normalVector[1] + normalVector[2]*normalVector[2]);
 				// return [normalVector[0] / magnitude, normalVector[1] / magnitude, normalVector[2] / magnitude];
 				if(normalVector[2] > 0){
 					return [normalVector[0] / magnitude, normalVector[1] / magnitude, normalVector[2] / magnitude];
@@ -121,7 +157,7 @@
 			// }
 			// testkernel(testdata, canvas.width, items.length);
 
-			const testkernel = gpu.createKernel(function(maspos, numPlanets, halfPlaneSize, dotsparsity) {
+			const testkernel = gpu.createKernel(function(maspos, numPlanets, halfPlaneSize, dotsparsity, globalZoffset) {
 				// const lines = [1024,512,256,128,64,32,16,8,4,2,1];
 
 				let gxhere = 0;
@@ -142,11 +178,61 @@
 					gyhere += denom*myY;
 				}
 				//ghere = ghere*100000
-				let ghere = 50000*(Math.sqrt(gxhere*gxhere + gyhere*gyhere));
+				let ghere = 30000*(Math.sqrt(gxhere*gxhere + gyhere*gyhere));
 				// return -ghere//Math.min(Math.max(ghere, -20), 20);
-				return Math.max(-ghere, -70);
+				return Math.max(-ghere*globalZoffset, -70);
 				
-			}).setOutput([500,500]);
+			}).setOutput([planeSize/dotsparsity,planeSize/dotsparsity]);
+			
+			function cpuKernel(){
+				let output = [];
+				for(let i = 0; i<dotCount; i++){
+					let outputRow = [];
+					for(let j = 0; j<dotCount; j++){
+						let gxhere = 0;
+						let gyhere = 0;
+						for(let k = 0; k<items.length; k++){ // 12 is number of planets
+							// ghere += maspos[k][2]/((this.thread.x-maspos[k][0])*(this.thread.x-maspos[k][0]) + (this.thread.y-maspos[k][1])*(this.thread.y-maspos[k][1]));
+							let myX = i*dotsparsity-phalf-items[k].x;
+							let myY = j*dotsparsity-phalf-items[k].y;
+							let dx = myX*myX;
+							let dy = myY*myY;
+							// let denom = (dx + dy)*(dx + dy);
+							// gxhere += maspos[k][2]*2*(this.thread.x-maspos[k][0])/denom;
+							// gyhere += maspos[k][2]*2*(this.thread.y-maspos[k][1])/denom;
+							let denom = 0.02*items[k].m/((dx+dy)**1.5); // SO slow
+							gxhere += denom*myX;
+							gyhere += denom*myY;
+						}
+						//ghere = ghere*100000
+						let ghere = 20000*(Math.sqrt(gxhere*gxhere + gyhere*gyhere));
+						// return -ghere//Math.min(Math.max(ghere, -20), 20);
+						outputRow.push(Math.max(-ghere*globalZoffset, -70));
+					}
+					output.push(outputRow);
+				}
+				return output;
+			}
+			
+			function cpuPotential(){
+				let output = [];
+				for(let i = 0; i<dotCount; i++){
+					let outputRow = [];
+					for(let j = 0; j<dotCount; j++){
+						let ghere = 0; // grav potential = GM/R
+						for(let k = 0; k<items.length; k++){ // 12 is number of planets
+							let myX = i*dotsparsity-phalf-items[k].x;
+							let myY = j*dotsparsity-phalf-items[k].y;
+							ghere += 24*items[k].m/Math.sqrt(myX*myX + myY*myY);
+						}
+						outputRow.push(Math.max(-ghere*globalZoffset, -70));
+					}
+					output.push(outputRow);
+				}
+				return output;
+			}
+
+
 			var ctx = canvas.getContext('2d');
 
 			items = []
@@ -406,6 +492,12 @@
 					let thisthresh = threshold+this.r;
 					let overx = Math.abs(this.x) - (planeSize/2-thisthresh);
 					let overy = Math.abs(this.y) - (planeSize/2-thisthresh);
+
+					//turn off border:
+					// overx = 0;
+					// overy = 0;
+
+
 					if(overx > 0){
 						// this.gx += Math.sign(this.x-canvas.width/2)/500000;
 						this.vx*=-0.8;
@@ -458,9 +550,12 @@
 					this.point.project(camera);
 
 					ctx.fillStyle = this.color;
+					ctx.lineWidth = 4;
+					ctx.strokeStyle ="rgba(255,255,255,0.3)";
 					ctx.beginPath();
-					ctx.arc(this.point.x, this.point.y, 0.1*2*camera.pdist*this.r/(Math.sqrt(dotdiff3d(...this.point.pos, ...camera.pos))-this.r), 0, 2 * Math.PI);
+					ctx.arc(this.point.x, this.point.y, 0.38*2*camera.pdist*this.r/(Math.sqrt(dotdiff3d(...this.point.pos, ...camera.pos))-this.r), 0, 2 * Math.PI);
 					ctx.fill();
+					ctx.stroke();
 				}
 			}
 
@@ -514,7 +609,6 @@
 				return [m2*(x1-x2)/((dx+dy)**1.5), m2*(y1-y2)/((dx+dy)**1.5)];
 			}
 			
-			let keybindsEaseX = keybindsTargetX;
 			function fillscreen(timestamp){
 				ctx.font = canvas.height / 40 + "px Arial";
 				ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
@@ -541,9 +635,9 @@
 
 			var initcamdist = 50; // fov effects (becomes orthographic as approaches infinity)
 			var zoomfac = 1/Math.sqrt(initcamdist);
-			var camdistort = 50; // fov effects (becomes orthographic as approaches infinity)
+			var camdistort = 1.2*50; // fov effects (becomes orthographic as approaches infinity)
 
-			camera = new Cam(39.33347860859019, 24.170967999528635, 19.20004600289643);
+			camera = new Cam(2.2*39.33347860859019, 2.2*24.170967999528635, 2.2*19.20004600289643);
 
 			var originsize = canvas.width/70;
 			var originpoints = [];
@@ -579,6 +673,17 @@
 					i++; //lazy to change the for loop
 				}
 			}
+
+			function drawPlanets(){ //approximation
+				// if the vector from one planet to another DOTTED WITH the camera axis vector is POSTIVE the planet in front
+				
+				items.sort((a,b)=>(camera.pos[0]*(a.point.pos[0]-b.point.pos[0]) + camera.pos[1]*(a.point.pos[1]-b.point.pos[1]) + camera.pos[2]*(a.point.pos[2]-b.point.pos[2])));
+				// console.log()
+				for(var i = 0; i < items.length; i++){
+					items[i].draw();
+				}
+			}
+
 			function refresh(){
 				//fillscreen();
 				// ctx.clearRect(0,0,canvas.width, canvas.height)
@@ -647,16 +752,20 @@
 
 			/// 3D STUFF ENDS HERE !!!!
 
-			oldTime = 0;
+			let timeRecorder = [];
+			let initTime = 0;
 			function loop(timestamp){
 				// if(pause){
 				// 	requestAnimationFrame(loop);
 				// 	return;
 				// }
 				// console.log(Math.round(timestamp-oldTime));
+				timeRecorder = [];
+				initTime = Date.now();
 				oldTime = timestamp;
 				if(!pause){
 					for(let iter = 0; iter < 4; iter++){
+						items = items.sort((a, b) => 0.5 - Math.random());
 						// if(click){
 						// 	let dx = selected.x - mouseX;
 						// 	let dy = selected.y - mouseY;
@@ -682,33 +791,45 @@
 						}
 						// ctx.fillStyle="black";
 						// ctx.fillRect(0,0,canvas.width,canvas.height);
-
-						items = items.sort((a, b) => 0.5 - Math.random());
 					}
 				}
+				timeRecorder.push([Date.now(), "planetcalc"])
 				// ctx.fillStyle = "black";
 				// ctx.fillRect(0, 0, canvas.width, canvas.height);
 				ctx.clearRect(0, 0, canvas.width, canvas.height);
 				fillscreen(timestamp);
 				camera.update();
-				draworigin();
-				for(var i = 0; i < items.length; i++){
-					items[i].draw();
-				}
+				// draworigin();
+
 				let testdata = [];
 				for(each of items){
-					testdata.push([each.x,each.y,each.m]);
-				}	
-				let zvals = testkernel(testdata, items.length, planeSize/2, dotsparsity);
+					testdata.push([each.x,each.y,each.m]); // maybe convert this process to references
+				}
+				timeRecorder.push([Date.now(), "testdata"])
+				// let zvals = testkernel(testdata, items.length, planeSize/2, dotsparsity, globalZoffset);
+				let zvals = cpuKernel();
+				// let zvals = cpuPotential();
+				timeRecorder.push([Date.now(), "kernel"])
 				projectPointField(zvals)
+				timeRecorder.push([Date.now(), "projectfield"])
 				// drawPointField();
-				drawFilledField();
+				// drawFilledField();
+				fastFilledField();
+				timeRecorder.push([Date.now(), "fillfield"])
+								
+				drawPlanets();
+				timeRecorder.push([Date.now(), "drawspheres"])
+
 				if(click){
 					ctx.strokeStyle = "white"
 					ctx.beginPath();
 					ctx.moveTo(mouseX, mouseY);
 					ctx.lineTo(selected.x, selected.y);
 					ctx.stroke();
+				}
+				timeRecorder.forEach((x,i)=>{timeRecorder[i]=x[1] + ": " + (x[0]-initTime);})
+				if(Math.random() < 0.02){
+					console.table(timeRecorder);
 				}
 				requestAnimationFrame(loop);
 			}
@@ -719,6 +840,9 @@
 			
 
 			randobject(numCircles);
+			let globalZoffset = items.length/items.reduce((a,b)=>a+b.m,0);
+			// globalZoffset = 1; //temp
+
 			// items[0].m = 500;
 			// items[0].r = 1;
 			requestAnimationFrame(loop)
